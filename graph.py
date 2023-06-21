@@ -1,5 +1,30 @@
-from functools import reduce
-from math import ceil
+class Pedigree:
+    def __init__(self):
+        self.children_map = dict()
+        self.parents_map = dict()
+
+    def add_child(self, parent, child):
+        if parent in self.children_map:
+            self.children_map[parent].append(child)
+        else:
+            self.children_map[parent] = list([child])
+
+    def add_line_from_pedigree(self, line):
+        (child, parent_left, parent_right) = list(map(lambda name: int(str(name)), line.strip('\n').split(' ')))
+        self.add_child(parent_left, child)
+        self.add_child(parent_right, child)
+        # Every non-founder appears only once in the pedigree as a child
+        assert child not in self.parents_map
+        self.parents_map[child] = [parent_left, parent_right]
+
+    @staticmethod
+    def get_pedigree_from_file(filename):
+        pedigree = Pedigree()
+        file = open(filename, 'r')
+        for line in file.readlines():
+            pedigree.add_line_from_pedigree(line)
+        file.close()
+        return pedigree
 
 
 class Vertex:
@@ -11,19 +36,17 @@ class Vertex:
     def set_ancestry_dictionary_for_source_vertex(self, descendants):
         self.ancestry_map = dict([(x, {self.label}) for x in descendants])
 
-    def set_ancestry_dictionary_given_parents(self, left_parent, right_parent, dictionary):
-        map = dict(left_parent.ancestry_map)
-        for key, value in right_parent.ancestry_map.items():
-            if key in map:
-                map[key] = set(map[key])
-                map[key].update(value)
+    def update_ancestry_dictionary(self, parent):
+        for key, value in parent.ancestry_map.items():
+            if key in self.ancestry_map:
+                self.ancestry_map[key].update(value)
             else:
-                map[key] = value
-        if self.label in dictionary:
-            for child in dictionary[self.label]:
-                map[child].add(self.label)
-        map[self.label].add(self.label)
-        self.ancestry_map = map
+                self.ancestry_map[key] = set(value)
+
+    def set_ancestry_dictionary_given_parents(self, descendants, left_parent, right_parent):
+        self.set_ancestry_dictionary_for_source_vertex(descendants)
+        self.update_ancestry_dictionary(left_parent)
+        self.update_ancestry_dictionary(right_parent)
 
     def __eq__(self, other):
         return self.label == other.label
@@ -40,6 +63,49 @@ class Graph:
         self.adjacency_list = adjacency_list
         self.reverse_adjacency_list = reverse_adjacency_list
 
+    @staticmethod
+    def get_graph_from_pedigree_and_probands(pedigree: Pedigree, probands: [int]):
+        # Assigning the levels and calculating the descendants for every vertex
+        levels = []
+        dictionary = pedigree.parents_map
+        current_level_vertices = set(probands)
+        descendants_map = dict()
+        for proband in probands:
+            descendants_map[proband] = {proband}
+        while current_level_vertices:
+            levels.append(current_level_vertices)
+            next_level_vertices = set()
+            for child in current_level_vertices:
+                if child in dictionary:
+                    next_level_vertices.update(dictionary[child])
+                    [left_parent, right_parent] = dictionary[child]
+                    if left_parent not in descendants_map:
+                        descendants_map[left_parent] = {left_parent}
+                    descendants_map[left_parent].update(descendants_map[child])
+                    if right_parent not in descendants_map:
+                        descendants_map[right_parent] = {right_parent}
+                    descendants_map[right_parent].update(descendants_map[child])
+            current_level_vertices = next_level_vertices
+        # Initializing the common-ancestor map for the founders
+        vertices = dict()
+        current_level_vertices = levels[len(levels) - 1]
+        for source_vertex in current_level_vertices:
+            vertex = Vertex(source_vertex)
+            vertex.set_ancestry_dictionary_for_source_vertex(descendants_map[source_vertex])
+            vertices[source_vertex] = vertex
+        # Initializing the common-ancestor map for all the other levels
+        for index in range(len(levels) - 1).__reversed__():
+            for child in levels[index]:
+                vertex = Vertex(child)
+                [left_parent, right_parent] = dictionary[child]
+                vertex.set_ancestry_dictionary_given_parents(descendants_map[child],
+                                                             vertices[left_parent], vertices[right_parent])
+                vertices[child] = vertex
+        # Removing the diagonal from the common-ancestry matrix
+        for value in vertices.values():
+            value.ancestry_map.pop(value.label)
+        return Graph(vertices, levels, pedigree.children_map, pedigree.parents_map)
+
     def get_vertices_for_given_level(self, level):
         return self.levels[level]
 
@@ -55,74 +121,3 @@ class Graph:
         if other in self.vertices[max_label].ancestry_map:
             return self.vertices[max_label].ancestry_map[other]
         return []
-
-
-def find_direct_descendants_of_vertex(graph, vertex, cache):
-    if vertex in cache:
-        return cache[vertex]
-    descendants = {vertex}
-    if vertex in graph:
-        for child in graph[vertex]:
-            descendants.update(find_direct_descendants_of_vertex(graph, child, cache))
-    cache[vertex] = descendants
-    return descendants
-
-
-def find_source_vertices(graph):
-    # Definitely not the most efficient way
-    return [x for x in graph.keys() if x not in reduce(set.union, map(set, graph.values()))]
-
-
-def calculate_all_descendants(graph):
-    source_vertices = find_source_vertices(graph)
-    cache = dict()
-    for source_vertex in source_vertices:
-        find_direct_descendants_of_vertex(graph, source_vertex, cache)
-    return (source_vertices, cache)
-
-
-def add_direct_descendant(dictionary, parent, child):
-    if parent in dictionary:
-        dictionary[parent].append(child)
-    else:
-        dictionary[parent] = list([child])
-
-
-def get_graph_from_file(filename):
-    file = open(filename, 'r')
-    # Saving the list of direct descendants for every vertex
-    dictionary = dict()
-    reverse_dictionary = dict()
-    for line in file.readlines():
-        line = line.strip('\n')
-        components = list(map(lambda name: int(str(name)), line.split(' ')))
-        add_direct_descendant(dictionary, components[1], components[0])
-        add_direct_descendant(dictionary, components[2], components[0])
-        add_direct_descendant(reverse_dictionary, components[0], components[1])
-        add_direct_descendant(reverse_dictionary, components[0], components[2])
-    (source_vertices, result) = calculate_all_descendants(dictionary)
-    vertices = dict()
-    # Starting with the source vertices
-    current_level_vertices = set(source_vertices)
-    for source_vertex in current_level_vertices:
-        vertex = Vertex(source_vertex)
-        vertex.set_ancestry_dictionary_for_source_vertex(result[source_vertex])
-        vertices[source_vertex] = vertex
-    levels = []
-    # Initializing all the other vertices
-    while current_level_vertices:
-        levels.append(current_level_vertices)
-        next_level_vertices = set()
-        for parent in current_level_vertices:
-            if parent in dictionary:
-                next_level_vertices.update(dictionary[parent])
-                for child in dictionary[parent]:
-                    vertex = Vertex(child)
-                    [left_parent, right_parent] = reverse_dictionary[child]
-                    vertex.set_ancestry_dictionary_given_parents(vertices[left_parent], vertices[right_parent], dictionary)
-                    vertices[child] = vertex
-        current_level_vertices = next_level_vertices
-    for value in vertices.values():
-        value.ancestry_map.pop(value.label)
-    graph = Graph(vertices, levels, dictionary, reverse_dictionary)
-    return graph
