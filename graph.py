@@ -2,6 +2,8 @@ class Pedigree:
     def __init__(self):
         self.children_map = dict()
         self.parents_map = dict()
+        self.source_vertices: [Vertex] = []
+        self.sink_vertices = []
 
     def add_child(self, parent, child):
         if parent in self.children_map:
@@ -10,12 +12,21 @@ class Pedigree:
             self.children_map[parent] = list([child])
 
     def add_line_from_pedigree(self, line):
-        (child, parent_left, parent_right) = list(map(lambda name: int(str(name)), line.strip('\n').split(' ')))
-        self.add_child(parent_left, child)
-        self.add_child(parent_right, child)
+        (child, mother, father) = list(map(lambda name: int(str(name)), line.strip('\n').split(' ')))
+        child_maternal = 2 * child - 1
+        child_paternal = child_maternal + 1
+        if mother == -1 or father == -1:
+            self.source_vertices.append(child)
+            return
+        self.add_child(2 * mother - 1, child_maternal)
+        self.add_child(2 * mother, child_maternal)
+        self.add_child(2 * father - 1, child_paternal)
+        self.add_child(2 * father, child_paternal)
         # Every non-founder appears only once in the pedigree as a child
-        assert child not in self.parents_map
-        self.parents_map[child] = [parent_left, parent_right]
+        assert child_maternal not in self.parents_map
+        assert child_paternal not in self.parents_map
+        self.parents_map[child_maternal] = [2 * mother - 1, 2 * mother]
+        self.parents_map[child_paternal] = [2 * father - 1, 2 * father]
 
     @staticmethod
     def get_pedigree_from_file(filename):
@@ -26,25 +37,47 @@ class Pedigree:
         file.close()
         return pedigree
 
+    def get_sink_vertices(self):
+        if self.sink_vertices:
+            return self.sink_vertices
+        self.sink_vertices = [x for x in self.parents_map.keys() if x not in self.children_map.keys()]
+        return self.sink_vertices
+
 
 class Vertex:
 
     def __init__(self, label: int):
-        self.label = label
-        self.ancestry_map = []
+        self.label: int = label
+        self.common_ancestry_map = dict()
+        self.descendants: {int} = {self.label}
+        self.children = []
+        self.parents = []
 
-    def set_ancestry_dictionary_for_source_vertex(self, descendants):
-        self.ancestry_map = dict([(x, {self.label}) for x in descendants])
+    def set_common_ancestry_map_self(self):
+        self.common_ancestry_map = dict([(x, {self.label}) for x in self.descendants])
 
     def update_ancestry_dictionary(self, parent):
-        for key, value in parent.ancestry_map.items():
-            if key in self.ancestry_map:
-                self.ancestry_map[key].update(value)
+        excluded_descendants = parent.get_excluded_descendants(self)
+        for key, value in parent.common_ancestry_map.items():
+            if key in self.descendants:
+                if key in excluded_descendants:
+                    self.common_ancestry_map[key].update(value)
+                else:
+                    continue
+            elif key in self.common_ancestry_map:
+                self.common_ancestry_map[key].update(value)
             else:
-                self.ancestry_map[key] = set(value)
+                self.common_ancestry_map[key] = set(value)
 
-    def set_ancestry_dictionary_given_parents(self, descendants, left_parent, right_parent):
-        self.set_ancestry_dictionary_for_source_vertex(descendants)
+    def get_excluded_descendants(self, excluded_vertex):
+        result = set()
+        for child in self.children:
+            if child != excluded_vertex:
+                result.update(child.descendants)
+        return result
+
+    def set_common_ancestry_map_given_parents(self, left_parent, right_parent):
+        self.set_common_ancestry_map_self()
         self.update_ancestry_dictionary(left_parent)
         self.update_ancestry_dictionary(right_parent)
 
@@ -64,46 +97,45 @@ class Graph:
         self.reverse_adjacency_list = reverse_adjacency_list
 
     @staticmethod
+    def process_level_vertex(vertices, parent_label: int, child: Vertex):
+        if parent_label not in vertices:
+            parent = Vertex(parent_label)
+            vertices[parent_label] = parent
+            # next_level_vertices.add(left_parent)
+        else:
+            parent = vertices[parent_label]
+        parent.descendants.update(child.descendants)
+        child.parents.append(parent)
+        parent.children.append(child)
+        return parent
+
+    @staticmethod
     def get_graph_from_pedigree_and_probands(pedigree: Pedigree, probands: [int]):
         # Assigning the levels and calculating the descendants for every vertex
-        levels = []
+        levels: [{Vertex}] = []
         dictionary = pedigree.parents_map
-        current_level_vertices = set(probands)
-        descendants_map = dict()
-        for proband in probands:
-            descendants_map[proband] = {proband}
+        current_level_vertices = {Vertex(x) for x in probands}
+        vertices: {Vertex} = dict()
+        for vertex in current_level_vertices:
+            vertices[vertex.label] = vertex
         while current_level_vertices:
             levels.append(current_level_vertices)
             next_level_vertices = set()
             for child in current_level_vertices:
-                if child in dictionary:
-                    next_level_vertices.update(dictionary[child])
-                    [left_parent, right_parent] = dictionary[child]
-                    if left_parent not in descendants_map:
-                        descendants_map[left_parent] = {left_parent}
-                    descendants_map[left_parent].update(descendants_map[child])
-                    if right_parent not in descendants_map:
-                        descendants_map[right_parent] = {right_parent}
-                    descendants_map[right_parent].update(descendants_map[child])
+                if child.label in dictionary:
+                    (left_parent_label, right_parent_label) = dictionary[child.label]
+                    next_level_vertices.add(Graph.process_level_vertex(vertices, left_parent_label, child))
+                    next_level_vertices.add(Graph.process_level_vertex(vertices, right_parent_label, child))
             current_level_vertices = next_level_vertices
         # Initializing the common-ancestor map for the founders
-        vertices = dict()
         current_level_vertices = levels[len(levels) - 1]
-        for source_vertex in current_level_vertices:
-            vertex = Vertex(source_vertex)
-            vertex.set_ancestry_dictionary_for_source_vertex(descendants_map[source_vertex])
-            vertices[source_vertex] = vertex
+        for founder_vertex in current_level_vertices:
+            founder_vertex.set_common_ancestry_map_self()
         # Initializing the common-ancestor map for all the other levels
         for index in range(len(levels) - 1).__reversed__():
-            for child in levels[index]:
-                vertex = Vertex(child)
-                [left_parent, right_parent] = dictionary[child]
-                vertex.set_ancestry_dictionary_given_parents(descendants_map[child],
-                                                             vertices[left_parent], vertices[right_parent])
-                vertices[child] = vertex
-        # Removing the diagonal from the common-ancestry matrix
-        for value in vertices.values():
-            value.ancestry_map.pop(value.label)
+            for vertex in levels[index]:
+                [left_parent, right_parent] = dictionary[vertex.label]
+                vertex.set_common_ancestry_map_given_parents(vertices[left_parent], vertices[right_parent])
         return Graph(vertices, levels, pedigree.children_map, pedigree.parents_map)
 
     def get_vertices_for_given_level(self, level):
@@ -118,6 +150,6 @@ class Graph:
     def get_common_ancestors(self, first, second):
         max_label = max(first, second)
         other = first + second - max_label
-        if other in self.vertices[max_label].ancestry_map:
-            return self.vertices[max_label].ancestry_map[other]
+        if other in self.vertices[max_label].common_ancestry_map:
+            return self.vertices[max_label].common_ancestry_map[other]
         return []
