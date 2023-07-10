@@ -134,8 +134,11 @@ class Graph:
         # Initializing the common-ancestor map for all the other levels
         for index in range(len(levels) - 1).__reversed__():
             for vertex in levels[index]:
-                [left_parent, right_parent] = dictionary[vertex.label]
-                vertex.set_common_ancestry_map_given_parents(vertices[left_parent], vertices[right_parent])
+                if vertex.label not in dictionary:
+                    vertex.set_common_ancestry_map_self()
+                else:
+                    [left_parent, right_parent] = dictionary[vertex.label]
+                    vertex.set_common_ancestry_map_given_parents(vertices[left_parent], vertices[right_parent])
         return Graph(vertices, levels, pedigree.children_map, pedigree.parents_map)
 
     def get_vertices_for_given_level(self, level):
